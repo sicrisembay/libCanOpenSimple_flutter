@@ -26,6 +26,7 @@ export 'src/canopen/sdo.dart';
 export 'src/canopen/pdo.dart';
 export 'src/canopen/sync.dart';
 export 'src/canopen/emcy.dart';
+export 'src/canopen/lss.dart';
 
 // Errors
 export 'src/errors.dart';
