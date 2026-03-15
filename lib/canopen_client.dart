@@ -20,6 +20,9 @@ library canopen_client;
 export 'src/canopen/message.dart';
 export 'src/canopen/types.dart';
 
+// CANopen protocol modules
+export 'src/canopen/nmt.dart';
+
 // Errors
 export 'src/errors.dart';
 
