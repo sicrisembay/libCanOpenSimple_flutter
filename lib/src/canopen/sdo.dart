@@ -1,7 +1,6 @@
 /// SDO (Service Data Object) client — CiA 301 §7.2.
 ///
-/// Phase 3 implements expedited transfers (≤ 4 bytes).
-/// Phase 4 will extend this with segmented transfers (> 4 bytes).
+/// Supports expedited transfers (≤ 4 bytes) and segmented transfers (> 4 bytes).
 library;
 
 import 'dart:async';
@@ -28,14 +27,23 @@ const int _csAbort = 0x80;
 /// Upper 3 bits mask for separating the command specifier.
 const int _csMask = 0xE0;
 
+// Segmented upload segment request (client → server): cs = 011.
+const int _csUploadSegReq = 0x60;
+
+// Segmented upload segment response (server → client): cs = 000.
+const int _csUploadSegRsp = 0x00;
+
+// Segmented download segment ACK (server → client): cs = 001.
+const int _csDownloadSegAck = 0x20;
+
 // ── SdoClient ────────────────────────────────────────────────────────────────
 
 /// CANopen SDO client providing read/write access to remote node object
 /// dictionaries.
 ///
 /// Supports:
-/// - **Expedited** transfers (≤ 4 bytes) — Phase 3.
-/// - **Segmented** transfers (> 4 bytes) — Phase 4 extension.
+/// - **Expedited** transfers (≤ 4 bytes).
+/// - **Segmented** transfers (> 4 bytes) — automatically selected when needed.
 ///
 /// All operations are serialised per node using a [Lock] to prevent overlapping
 /// transactions on the same SDO channel.
@@ -64,10 +72,8 @@ class SdoClient {
 
   /// Reads a remote object dictionary entry via SDO upload.
   ///
-  /// Handles expedited (≤ 4 bytes) transfers transparently.
-  /// Segmented transfers (> 4 bytes) require Phase 4 — a
-  /// [CanOpenException] is thrown if the node responds with a
-  /// segmented initiation.
+  /// Handles both expedited (≤ 4 bytes) and segmented (> 4 bytes) transfers
+  /// transparently — the transfer type is determined by the node's response.
   ///
   /// [nodeId]   — Target node (1–127).
   /// [index]    — Object dictionary index (e.g. `0x1000`).
@@ -83,33 +89,59 @@ class SdoClient {
     int subIndex, {
     Duration timeout = const Duration(seconds: 1),
   }) {
+    final ctx = 'SDO read 0x${index.toRadixString(16)}/$subIndex';
     return _lockFor(nodeId).synchronized(() async {
-      // Build 8-byte upload request.
       final req = _buildUploadRequest(index, subIndex);
-      final response = await _transact(nodeId, req,
-          timeout: timeout,
-          context: 'SDO read 0x${index.toRadixString(16)}/$subIndex');
+      final initResp =
+          await _transact(nodeId, req, timeout: timeout, context: ctx);
 
-      return _parseUploadResponse(response, index, subIndex);
+      if (initResp.isEmpty) {
+        throw const CanOpenException('SDO response is empty');
+      }
+      if (initResp[0] == _csAbort) {
+        final abortCode = initResp.length >= 8 ? decodeU32LE(initResp, 4) : 0;
+        throw SdoAbortException(abortCode);
+      }
+      if ((initResp[0] & _csMask) != _csUploadReq) {
+        throw CanOpenException(
+          'Unexpected SDO upload initiate response: '
+          '0x${initResp[0].toRadixString(16).toUpperCase().padLeft(2, '0')}',
+        );
+      }
+
+      final eFlag = (initResp[0] & 0x02) != 0; // expedited
+      if (eFlag) {
+        // Expedited: data in bytes [4 .. 4+dataLen).
+        final sFlag = (initResp[0] & 0x01) != 0;
+        final n = sFlag ? (initResp[0] >> 2) & 0x03 : 0;
+        final dataLen = 4 - n;
+        return Uint8List.fromList(initResp.sublist(4, 4 + dataLen));
+      } else {
+        // Segmented upload.
+        return _segmentedUpload(
+          nodeId,
+          timeout: timeout,
+          context: ctx,
+        );
+      }
     });
   }
 
   /// Writes a value to a remote object dictionary entry via SDO download.
   ///
-  /// Data ≤ 4 bytes uses an expedited transfer.
-  /// Data > 4 bytes requires Phase 4 (segmented) — a [CanOpenException]
-  /// is thrown until then.
+  /// Data ≤ 4 bytes uses an expedited transfer; larger data is sent using
+  /// a segmented transfer automatically.
   ///
   /// [nodeId]   — Target node (1–127).
   /// [index]    — Object dictionary index.
   /// [subIndex] — Sub-index.
-  /// [data]     — Raw bytes to write (≤ 4 bytes for expedited).
+  /// [data]     — Raw bytes to write.
   /// [timeout]  — Maximum time to wait for a response.
   ///
   /// Throws [SdoAbortException] if the remote node aborts the transfer.
   /// Throws [CanOpenTimeoutException] if no response arrives within [timeout].
-  /// Throws [CanOpenException] if [data] is > 4 bytes (segmented not yet
-  /// implemented).
+  /// Throws [CanOpenException] if [data] is empty or an unexpected response
+  /// is received.
   Future<void> sdoWrite(
     int nodeId,
     int index,
@@ -117,19 +149,30 @@ class SdoClient {
     Uint8List data, {
     Duration timeout = const Duration(seconds: 1),
   }) {
-    if (data.length > 4) {
-      throw CanOpenException(
-        'SDO segmented download not yet supported (Phase 4). '
-        'Data length ${data.length} > 4 bytes.',
-      );
+    if (data.isEmpty) {
+      throw const CanOpenException('SDO write data must not be empty');
     }
     return _lockFor(nodeId).synchronized(() async {
-      final req = _buildDownloadRequest(index, subIndex, data);
-      final response = await _transact(nodeId, req,
+      if (data.length <= 4) {
+        // Expedited download.
+        final req = _buildDownloadRequest(index, subIndex, data);
+        final response = await _transact(
+          nodeId,
+          req,
           timeout: timeout,
-          context: 'SDO write 0x${index.toRadixString(16)}/$subIndex');
-
-      _parseDownloadResponse(response, index, subIndex);
+          context: 'SDO write 0x${index.toRadixString(16)}/$subIndex',
+        );
+        _parseDownloadResponse(response, index, subIndex);
+      } else {
+        // Segmented download.
+        await _segmentedDownload(
+          nodeId,
+          index,
+          subIndex,
+          data,
+          timeout: timeout,
+        );
+      }
     });
   }
 
@@ -197,7 +240,7 @@ class SdoClient {
   /// Reads a UTF-8 string from the remote object dictionary.
   ///
   /// Uses segmented transfer automatically when the node responds with a
-  /// segmented initiation (requires Phase 4).
+  /// segmented initiation.
   Future<String> sdoReadString(
     int nodeId,
     int index,
@@ -255,6 +298,35 @@ class SdoClient {
     Duration timeout = const Duration(seconds: 1),
   }) =>
       sdoWrite(nodeId, index, subIndex, encodeF32LE(value), timeout: timeout);
+
+  /// Reads a 64-bit IEEE 754 double from the remote object dictionary.
+  ///
+  /// Typically uses a segmented transfer (8 bytes > 4-byte expedited limit).
+  Future<double> sdoReadF64(
+    int nodeId,
+    int index,
+    int subIndex, {
+    Duration timeout = const Duration(seconds: 1),
+  }) async {
+    final data = await sdoRead(nodeId, index, subIndex, timeout: timeout);
+    if (data.length < 8) {
+      throw CanOpenException(
+          'SDO read returned ${data.length} byte(s), expected ≥ 8');
+    }
+    return decodeF64LE(data);
+  }
+
+  /// Writes a 64-bit IEEE 754 double to the remote object dictionary.
+  ///
+  /// Automatically uses segmented transfer (8 bytes).
+  Future<void> sdoWriteF64(
+    int nodeId,
+    int index,
+    int subIndex,
+    double value, {
+    Duration timeout = const Duration(seconds: 1),
+  }) =>
+      sdoWrite(nodeId, index, subIndex, encodeF64LE(value), timeout: timeout);
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -326,51 +398,26 @@ class SdoClient {
     return frame;
   }
 
-  // ── Response parsers ──────────────────────────────────────────────────────
-
-  /// Parses an SDO upload response and returns the data bytes.
-  static Uint8List _parseUploadResponse(
-      Uint8List resp, int index, int subIndex) {
-    if (resp.isEmpty) {
-      throw const CanOpenException('SDO response is empty');
-    }
-
-    final cs = resp[0] & _csMask;
-
-    // Abort (cs = 4 → 0x80)
-    if (resp[0] == _csAbort) {
-      if (resp.length >= 8) {
-        final abortCode = decodeU32LE(resp, 4);
-        throw SdoAbortException(abortCode);
-      }
-      throw SdoAbortException(0);
-    }
-
-    // Upload response: cs = 2 → 0x40
-    if (cs == _csUploadReq) {
-      final eFlag = (resp[0] & 0x02) != 0; // expedited
-      final sFlag = (resp[0] & 0x01) != 0; // size indicated
-
-      if (!eFlag) {
-        // Segmented initiation — not yet supported (Phase 4).
-        throw CanOpenException(
-          'SDO segmented upload not yet supported (Phase 4). '
-          'Response from node for 0x${index.toRadixString(16)}/$subIndex '
-          'indicates data > 4 bytes.',
-        );
-      }
-
-      // Expedited: extract n (number of unused bytes in [4..7]).
-      final n = sFlag ? (resp[0] >> 2) & 0x03 : 0;
-      final dataLen = 4 - n;
-      return Uint8List.fromList(resp.sublist(4, 4 + dataLen));
-    }
-
-    throw CanOpenException(
-      'Unexpected SDO response byte: '
-      '0x${resp[0].toRadixString(16).toUpperCase().padLeft(2, '0')}',
-    );
+  /// Builds an 8-byte SDO segmented download initiate request.
+  ///
+  /// Sets e=0 (segmented), s=1 (size indicated), with [dataLength] in
+  /// bytes [4..7] LE.
+  static Uint8List _buildSegmentedDownloadInitiate(
+      int index, int subIndex, int dataLength) {
+    final frame = Uint8List(8);
+    // cs=001 (download initiate), e=0, s=1 → 0x20 | 0x01 = 0x21
+    frame[0] = 0x21;
+    frame[1] = index & 0xFF;
+    frame[2] = (index >> 8) & 0xFF;
+    frame[3] = subIndex & 0xFF;
+    frame[4] = dataLength & 0xFF;
+    frame[5] = (dataLength >> 8) & 0xFF;
+    frame[6] = (dataLength >> 16) & 0xFF;
+    frame[7] = (dataLength >> 24) & 0xFF;
+    return frame;
   }
+
+  // ── Response parsers ──────────────────────────────────────────────────────
 
   /// Validates an SDO download (write) response.
   static void _parseDownloadResponse(Uint8List resp, int index, int subIndex) {
@@ -394,5 +441,153 @@ class SdoClient {
       'Unexpected SDO download response byte: '
       '0x${resp[0].toRadixString(16).toUpperCase().padLeft(2, '0')}',
     );
+  }
+
+  // ── Segmented transfers ───────────────────────────────────────────────────
+
+  /// Performs a segmented SDO upload (read > 4 bytes).
+  ///
+  /// Called after the initiate response confirms a segmented transfer.
+  /// Loops sending upload-segment requests until the node sets the
+  /// "last segment" (c) bit.
+  ///
+  /// [indicatedSize] — Total byte count from the initiate response (0 if
+  ///   the node did not set the s-bit, i.e. size is unknown in advance).
+  Future<Uint8List> _segmentedUpload(
+    int nodeId, {
+    required Duration timeout,
+    required String context,
+  }) async {
+    final accumulator = <int>[];
+    var toggle = 0;
+
+    while (true) {
+      // Upload segment request: cs=011, toggle in bit 4.
+      final segReq = Uint8List(8);
+      segReq[0] = _csUploadSegReq | (toggle << 4);
+
+      final segResp =
+          await _transact(nodeId, segReq, timeout: timeout, context: context);
+
+      if (segResp.isEmpty) {
+        throw const CanOpenException('SDO upload segment response is empty');
+      }
+      if (segResp[0] == _csAbort) {
+        final abortCode = segResp.length >= 8 ? decodeU32LE(segResp, 4) : 0;
+        throw SdoAbortException(abortCode);
+      }
+      // Upload segment response: cs = 000 (bits 7:5).
+      if ((segResp[0] & _csMask) != _csUploadSegRsp) {
+        throw CanOpenException(
+          'Unexpected SDO upload segment response: '
+          '0x${segResp[0].toRadixString(16).toUpperCase().padLeft(2, '0')}',
+        );
+      }
+
+      final respToggle = (segResp[0] >> 4) & 0x01;
+      if (respToggle != toggle) {
+        throw CanOpenException(
+          'SDO upload segment toggle mismatch: '
+          'expected $toggle, got $respToggle',
+        );
+      }
+
+      final n = (segResp[0] >> 1) & 0x07; // unused bytes at end of segment
+      final c = segResp[0] & 0x01; // 1 = last segment
+      final segDataLen = 7 - n;
+
+      if (segDataLen > 0) {
+        accumulator.addAll(segResp.sublist(1, 1 + segDataLen));
+      }
+
+      toggle = 1 - toggle;
+
+      if (c == 1) {
+        break;
+      }
+    }
+
+    return Uint8List.fromList(accumulator);
+  }
+
+  /// Performs a segmented SDO download (write > 4 bytes).
+  ///
+  /// Sends a segmented download initiate request, awaits the node's ACK,
+  /// then sends data in 7-byte chunks until all [data] is transferred.
+  Future<void> _segmentedDownload(
+    int nodeId,
+    int index,
+    int subIndex,
+    Uint8List data, {
+    required Duration timeout,
+  }) async {
+    final context = 'SDO write 0x${index.toRadixString(16)}/$subIndex';
+
+    // ── Initiation ──────────────────────────────────────────────────────────
+    final initReq =
+        _buildSegmentedDownloadInitiate(index, subIndex, data.length);
+    final initResp =
+        await _transact(nodeId, initReq, timeout: timeout, context: context);
+
+    if (initResp.isEmpty) {
+      throw const CanOpenException('SDO response is empty');
+    }
+    if (initResp[0] == _csAbort) {
+      final abortCode = initResp.length >= 8 ? decodeU32LE(initResp, 4) : 0;
+      throw SdoAbortException(abortCode);
+    }
+    // Initiate download response: cs = 011 = 0x60.
+    if ((initResp[0] & _csMask) != _csDownloadRsp) {
+      throw CanOpenException(
+        'Unexpected SDO download initiate response: '
+        '0x${initResp[0].toRadixString(16).toUpperCase().padLeft(2, '0')}',
+      );
+    }
+
+    // ── Segment loop ────────────────────────────────────────────────────────
+    var toggle = 0;
+    var offset = 0;
+
+    while (offset < data.length) {
+      final remaining = data.length - offset;
+      final segLen = remaining < 7 ? remaining : 7;
+      final isLast = (offset + segLen) >= data.length;
+      final n = 7 - segLen; // unused bytes in this segment frame
+      final c = isLast ? 1 : 0; // last-segment flag
+
+      // Download segment request: cs=000, toggle in bit4, n in bits[3:1], c in bit0.
+      final segReq = Uint8List(8);
+      segReq[0] = (toggle << 4) | (n << 1) | c;
+      segReq.setRange(1, 1 + segLen, data, offset);
+
+      final segResp =
+          await _transact(nodeId, segReq, timeout: timeout, context: context);
+
+      if (segResp.isEmpty) {
+        throw const CanOpenException('SDO download segment ACK is empty');
+      }
+      if (segResp[0] == _csAbort) {
+        final abortCode = segResp.length >= 8 ? decodeU32LE(segResp, 4) : 0;
+        throw SdoAbortException(abortCode);
+      }
+      // Download segment ACK: cs = 001 = 0x20.
+      if ((segResp[0] & _csMask) != _csDownloadSegAck) {
+        throw CanOpenException(
+          'Unexpected SDO download segment ACK: '
+          '0x${segResp[0].toRadixString(16).toUpperCase().padLeft(2, '0')}',
+        );
+      }
+
+      final respToggle = (segResp[0] >> 4) & 0x01;
+      if (respToggle != toggle) {
+        throw CanOpenException(
+          'SDO download segment toggle mismatch: '
+          'expected $toggle, got $respToggle',
+        );
+      }
+
+      toggle = 1 - toggle;
+      offset += segLen;
+    }
   }
 }

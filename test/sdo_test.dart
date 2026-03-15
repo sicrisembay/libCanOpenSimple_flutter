@@ -203,14 +203,6 @@ void main() {
       expect(req.data[6], 0x34);
       expect(req.data[7], 0x12);
     });
-
-    test('write > 4 bytes throws CanOpenException before sending', () async {
-      expect(
-        () => sdo.sdoWrite(5, 0x2000, 0, Uint8List(5)),
-        throwsA(isA<CanOpenException>()),
-      );
-      expect(adapter.sent, isEmpty);
-    });
   });
 
   // ── Abort handling ────────────────────────────────────────────────────────
@@ -307,23 +299,6 @@ void main() {
       expect(results[0], 1);
       expect(results[1], 2);
       expect(results[2], 3);
-    });
-  });
-
-  // ── Segmented response guard ──────────────────────────────────────────────
-
-  group('Segmented response guard', () {
-    test('segmented upload response throws CanOpenException', () async {
-      // e=0 in response byte → segmented initiation (not yet supported).
-      final frame = Uint8List(8);
-      frame[0] = 0x41; // cs=2, e=0, s=1 — segmented
-      adapter.autoResponse =
-          CanMessage(cobId: CobId.sdoTxBase + 5, data: frame);
-
-      await expectLater(
-        sdo.sdoRead(5, 0x2000, 0),
-        throwsA(isA<CanOpenException>()),
-      );
     });
   });
 }
