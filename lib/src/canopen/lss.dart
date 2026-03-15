@@ -1,8 +1,7 @@
 /// LSS (Layer Setting Services) client — CiA 305.
 ///
-/// Phase 7 implements switch-state and inquire services.
-/// Phase 8 extends with configure node-ID, configure bit-timing,
-/// store configuration, and Fastscan.
+/// Supports switch-state, inquire, configure node-ID / bit-timing,
+/// store configuration, and Fastscan discovery.
 library;
 
 import 'dart:async';
@@ -53,6 +52,58 @@ const int lssCsIdentifySlave = 0x4F;
 
 /// Identify Non-Configured Slave response cs byte.
 const int lssCsIdentifyNonConfigured = 0x50;
+
+/// Configure Node-ID command specifier (request & response share cs byte).
+const int lssCsConfigureNodeId = 0x11;
+
+/// Configure Bit-Timing command specifier (request & response share cs byte).
+const int lssCsConfigureBitTiming = 0x13;
+
+/// Activate Bit-Timing command specifier (fire-and-forget).
+const int lssCsActivateBitTiming = 0x15;
+
+/// Store Configuration command specifier (request & response share cs byte).
+const int lssCsStoreConfiguration = 0x17;
+
+/// Fastscan command specifier (master → slaves).
+const int lssCsFastscan = 0x51;
+
+/// Fastscan response cs byte (same as Identify Slave).
+const int lssCsFastscanResponse = 0x4F;
+
+// ── LssError ─────────────────────────────────────────────────────────────────
+
+/// Error codes returned in LSS configure and store responses.
+enum LssError {
+  /// Operation succeeded.
+  success(0),
+
+  /// Node-ID out of range (not 1–127).
+  nodeIdOutOfRange(1),
+
+  /// Manufacturer-specific error.
+  specificError(0xFF);
+
+  /// Creates an [LssError] with numeric [code].
+  const LssError(this.code);
+
+  /// The numeric error code from the LSS response byte.
+  final int code;
+
+  /// Returns a human-readable description of the error.
+  String get description => switch (this) {
+        LssError.success => 'Success',
+        LssError.nodeIdOutOfRange => 'Node-ID out of range',
+        LssError.specificError => 'Manufacturer-specific error',
+      };
+
+  /// Parses a raw LSS error byte into an [LssError].
+  static LssError fromByte(int byte) => switch (byte) {
+        0 => LssError.success,
+        1 => LssError.nodeIdOutOfRange,
+        _ => LssError.specificError,
+      };
+}
 
 // ── LssAddress ────────────────────────────────────────────────────────────────
 
@@ -213,6 +264,175 @@ class LssClient {
   }) =>
       _inquireMulti(lssCsInquireSerialNumber, timeout: timeout);
 
+  // ── Configure / Store ─────────────────────────────────────────────────────
+
+  /// Configures the node-ID of the selected LSS slave.
+  ///
+  /// [nodeId] must be in the range 1–127; some implementations also allow 255
+  /// (unconfigured). The slave must be in configuration mode.
+  ///
+  /// Returns [LssError.success] on acknowledgement, or an appropriate error
+  /// code if the slave rejects the value.
+  ///
+  /// Throws [CanOpenTimeoutException] if no response arrives within [timeout].
+  Future<LssError> lssConfigureNodeId(
+    int nodeId, {
+    Duration timeout = const Duration(seconds: 1),
+  }) {
+    return _lock.synchronized(() async {
+      final req = _buildFrame(lssCsConfigureNodeId, [nodeId & 0xFF]);
+      final resp = await _transact(
+        req,
+        lssCsConfigureNodeId,
+        timeout: timeout,
+        context: 'LSS configure node-ID',
+      );
+      // byte[1] = error code, byte[2] = spec error (used when code = 0xFF).
+      return LssError.fromByte(resp.length > 1 ? resp[1] : 0);
+    });
+  }
+
+  /// Configures the bit-timing parameters of the selected LSS slave.
+  ///
+  /// [tableSelector] selects the bit-timing table (0 = CiA standard table).
+  /// [tableIndex] selects the entry within the table (0–9 for standard table).
+  ///
+  /// Returns [LssError.success] on acknowledgement.
+  ///
+  /// Throws [CanOpenTimeoutException] if no response arrives within [timeout].
+  Future<LssError> lssConfigureBitTiming(
+    int tableSelector,
+    int tableIndex, {
+    Duration timeout = const Duration(seconds: 1),
+  }) {
+    return _lock.synchronized(() async {
+      final req = _buildFrame(
+          lssCsConfigureBitTiming, [tableSelector & 0xFF, tableIndex & 0xFF]);
+      final resp = await _transact(
+        req,
+        lssCsConfigureBitTiming,
+        timeout: timeout,
+        context: 'LSS configure bit timing',
+      );
+      return LssError.fromByte(resp.length > 1 ? resp[1] : 0);
+    });
+  }
+
+  /// Activates the new bit-timing parameters on the selected LSS slave.
+  ///
+  /// [switchDelayMs] is the delay in milliseconds the slave waits before and
+  /// after switching (CiA 305 §6.4.4).  This is fire-and-forget — no response
+  /// is expected.
+  Future<void> lssActivateBitTiming(int switchDelayMs) {
+    return _lock.synchronized(() async {
+      final delayLow = switchDelayMs & 0xFF;
+      final delayHigh = (switchDelayMs >> 8) & 0xFF;
+      final req = _buildFrame(lssCsActivateBitTiming, [delayLow, delayHigh]);
+      await _adapter.send(CanMessage(cobId: CobId.lssMaster, data: req));
+    });
+  }
+
+  /// Stores the current node-ID and bit-timing configuration to NVM on the
+  /// selected LSS slave.
+  ///
+  /// Returns [LssError.success] on acknowledgement.
+  ///
+  /// Throws [CanOpenTimeoutException] if no response arrives within [timeout].
+  Future<LssError> lssStoreConfiguration({
+    Duration timeout = const Duration(seconds: 1),
+  }) {
+    return _lock.synchronized(() async {
+      final req = _buildFrame(lssCsStoreConfiguration, []);
+      final resp = await _transact(
+        req,
+        lssCsStoreConfiguration,
+        timeout: timeout,
+        context: 'LSS store configuration',
+      );
+      return LssError.fromByte(resp.length > 1 ? resp[1] : 0);
+    });
+  }
+
+  // ── Fastscan ──────────────────────────────────────────────────────────────
+
+  /// Discovers all unconfigured LSS slaves on the network using a simplified
+  /// Fastscan broadcast.
+  ///
+  /// For each responding device:
+  /// 1. Reads the four identity fields via inquire.
+  /// 2. Assigns a node-ID starting from [startNodeId] (incrementing).
+  /// 3. Adds the [LssAddress] to the result list.
+  ///
+  /// The probe is repeated until no device responds within [probeTimeout].
+  ///
+  /// [timeout]      — Total maximum time for the entire scan.
+  /// [probeTimeout] — Timeout for each individual probe and inquire.
+  /// [startNodeId]  — Node-ID assigned to the first discovered device.
+  Future<List<LssAddress>> lssFastscan({
+    Duration timeout = const Duration(seconds: 5),
+    Duration probeTimeout = const Duration(milliseconds: 200),
+    int startNodeId = 1,
+  }) async {
+    final results = <LssAddress>[];
+    var nextNodeId = startNodeId;
+    final deadline = DateTime.now().add(timeout);
+
+    while (DateTime.now().isBefore(deadline) && nextNodeId <= 127) {
+      // Probe: Fastscan broadcast with BitChecked=0x80 (match-all sweep).
+      final probeReq = _buildFastscanFrame(
+        idNumber: 0,
+        bitChecked: 0x80,
+        lssSub: 0,
+        lssNext: 0,
+      );
+
+      try {
+        await _transact(
+          probeReq,
+          lssCsFastscanResponse,
+          timeout: probeTimeout,
+          context: 'LSS fastscan probe',
+        );
+      } on CanOpenTimeoutException {
+        break; // No more devices.
+      }
+
+      // Read all four identity fields.
+      int vendorId, productCode, revisionNumber, serialNumber;
+      try {
+        vendorId =
+            await _inquireUnlocked(lssCsInquireVendorId, timeout: probeTimeout);
+        productCode = await _inquireUnlocked(lssCsInquireProductCode,
+            timeout: probeTimeout);
+        revisionNumber = await _inquireUnlocked(lssCsInquireRevisionNumber,
+            timeout: probeTimeout);
+        serialNumber = await _inquireUnlocked(lssCsInquireSerialNumber,
+            timeout: probeTimeout);
+      } on CanOpenTimeoutException {
+        break; // Lost the device mid-scan.
+      }
+
+      results.add(LssAddress(
+        vendorId: vendorId,
+        productCode: productCode,
+        revisionNumber: revisionNumber,
+        serialNumber: serialNumber,
+      ));
+
+      // Assign a node-ID and store it.
+      try {
+        await _configureNodeIdUnlocked(nextNodeId, timeout: probeTimeout);
+        await _storeConfigurationUnlocked(timeout: probeTimeout);
+      } on CanOpenTimeoutException {
+        // Continue — the address was already recorded.
+      }
+
+      nextNodeId++;
+    }
+
+    return results;
+  }
+
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   /// Releases resources.
@@ -346,7 +566,71 @@ class LssClient {
     });
   }
 
-  // ── Frame builder ─────────────────────────────────────────────────────────
+  // ── Frame builders ────────────────────────────────────────────────────────
+
+  /// Builds an 8-byte LSS Fastscan frame.
+  static Uint8List _buildFastscanFrame({
+    required int idNumber,
+    required int bitChecked,
+    required int lssSub,
+    required int lssNext,
+  }) {
+    final frame = Uint8List(8);
+    frame[0] = lssCsFastscan;
+    frame[1] = idNumber & 0xFF;
+    frame[2] = (idNumber >> 8) & 0xFF;
+    frame[3] = (idNumber >> 16) & 0xFF;
+    frame[4] = (idNumber >> 24) & 0xFF;
+    frame[5] = bitChecked & 0xFF;
+    frame[6] = lssSub & 0xFF;
+    frame[7] = lssNext & 0xFF;
+    return frame;
+  }
+
+  /// Inquire helper that does NOT acquire [_lock] — for use inside Fastscan
+  /// which already holds the lock via its outer context.
+  Future<int> _inquireUnlocked(int cs, {required Duration timeout}) async {
+    final request = _buildFrame(cs, []);
+    final resp = await _transact(
+      request,
+      cs,
+      timeout: timeout,
+      context: 'LSS inquire 0x${cs.toRadixString(16)}',
+    );
+    if (resp.length < 5) {
+      throw CanOpenException(
+          'LSS inquire response too short (${resp.length} bytes)');
+    }
+    return decodeU32LE(resp, 1);
+  }
+
+  /// Configure node-ID without acquiring [_lock].
+  Future<LssError> _configureNodeIdUnlocked(
+    int nodeId, {
+    required Duration timeout,
+  }) async {
+    final req = _buildFrame(lssCsConfigureNodeId, [nodeId & 0xFF]);
+    final resp = await _transact(
+      req,
+      lssCsConfigureNodeId,
+      timeout: timeout,
+      context: 'LSS configure node-ID',
+    );
+    return LssError.fromByte(resp.length > 1 ? resp[1] : 0);
+  }
+
+  /// Store configuration without acquiring [_lock].
+  Future<LssError> _storeConfigurationUnlocked(
+      {required Duration timeout}) async {
+    final req = _buildFrame(lssCsStoreConfiguration, []);
+    final resp = await _transact(
+      req,
+      lssCsStoreConfiguration,
+      timeout: timeout,
+      context: 'LSS store configuration',
+    );
+    return LssError.fromByte(resp.length > 1 ? resp[1] : 0);
+  }
 
   /// Builds an 8-byte LSS frame with [cs] as byte[0] and [payload] in
   /// bytes[1..n]; remaining bytes are zero-padded.

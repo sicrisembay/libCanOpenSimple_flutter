@@ -1,4 +1,4 @@
-/// Unit tests for LssClient — Phase 7 (switch & inquire services).
+/// Unit tests for LssClient — Phase 7 & 8.
 library;
 
 import 'dart:async';
@@ -16,7 +16,8 @@ class FakeCanAdapter implements ICanAdapter {
   final List<CanMessage> sent = [];
 
   /// If set, injects one response for each outgoing frame.
-  CanMessage Function(CanMessage request)? autoReplyWith;
+  /// Return null to simulate no response (timeout).
+  CanMessage? Function(CanMessage request)? autoReplyWith;
 
   @override
   Stream<CanMessage> get rxFrames => _rxCtrl.stream;
@@ -32,7 +33,7 @@ class FakeCanAdapter implements ICanAdapter {
     sent.add(message);
     if (autoReplyWith != null) {
       final resp = autoReplyWith!(message);
-      scheduleMicrotask(() => _rxCtrl.add(resp));
+      if (resp != null) scheduleMicrotask(() => _rxCtrl.add(resp));
     }
   }
 
@@ -300,6 +301,222 @@ void main() {
       );
 
       expect(vendors, equals([0x00000001, 0x00000002]));
+    });
+  });
+
+  // ── Phase 8: lssConfigureNodeId ───────────────────────────────────────────
+
+  group('lssConfigureNodeId', () {
+    test('sends correct frame (cs=0x11, node-ID in byte[1])', () async {
+      adapter.autoReplyWith = (_) => lssResponse(lssCsConfigureNodeId, 0);
+
+      await lss.lssConfigureNodeId(10);
+
+      expect(adapter.sent[0].cobId, equals(CobId.lssMaster));
+      expect(adapter.sent[0].data[0], equals(lssCsConfigureNodeId));
+      expect(adapter.sent[0].data[1], equals(10));
+    });
+
+    test('returns LssError.success on error byte 0x00', () async {
+      adapter.autoReplyWith = (_) => lssResponse(lssCsConfigureNodeId, 0);
+
+      final result = await lss.lssConfigureNodeId(10);
+
+      expect(result, equals(LssError.success));
+    });
+
+    test('returns LssError.nodeIdOutOfRange on error byte 0x01', () async {
+      // Build an 8-byte response with error byte = 1.
+      final data = Uint8List(8)
+        ..[0] = lssCsConfigureNodeId
+        ..[1] = 1;
+      adapter.autoReplyWith = (_) => CanMessage(cobId: CobId.lss, data: data);
+
+      final result = await lss.lssConfigureNodeId(128);
+
+      expect(result, equals(LssError.nodeIdOutOfRange));
+    });
+
+    test('throws CanOpenTimeoutException if no response', () async {
+      await expectLater(
+        lss.lssConfigureNodeId(5, timeout: const Duration(milliseconds: 10)),
+        throwsA(isA<CanOpenTimeoutException>()),
+      );
+    });
+  });
+
+  // ── Phase 8: lssConfigureBitTiming ───────────────────────────────────────
+
+  group('lssConfigureBitTiming', () {
+    test('sends correct frame (cs=0x13, table and index bytes)', () async {
+      adapter.autoReplyWith = (_) => lssResponse(lssCsConfigureBitTiming, 0);
+
+      await lss.lssConfigureBitTiming(0, 4); // standard table, 500 kbps
+
+      expect(adapter.sent[0].data[0], equals(lssCsConfigureBitTiming));
+      expect(adapter.sent[0].data[1], equals(0)); // tableSelector
+      expect(adapter.sent[0].data[2], equals(4)); // tableIndex
+    });
+
+    test('returns LssError.success on success response', () async {
+      adapter.autoReplyWith = (_) => lssResponse(lssCsConfigureBitTiming, 0);
+
+      final result = await lss.lssConfigureBitTiming(0, 3);
+
+      expect(result, equals(LssError.success));
+    });
+  });
+
+  // ── Phase 8: lssActivateBitTiming ────────────────────────────────────────
+
+  group('lssActivateBitTiming', () {
+    test('sends correct frame (cs=0x15, delay LE in bytes[1..2])', () async {
+      await lss.lssActivateBitTiming(500); // 500 ms delay
+
+      expect(adapter.sent[0].data[0], equals(lssCsActivateBitTiming));
+      expect(adapter.sent[0].data[1], equals(0xF4)); // 500 & 0xFF
+      expect(adapter.sent[0].data[2], equals(0x01)); // 500 >> 8
+    });
+
+    test('no response expected — returns immediately', () async {
+      await expectLater(
+        lss.lssActivateBitTiming(100),
+        completes,
+      );
+    });
+  });
+
+  // ── Phase 8: lssStoreConfiguration ───────────────────────────────────────
+
+  group('lssStoreConfiguration', () {
+    test('sends correct frame (cs=0x17, remaining bytes zero)', () async {
+      adapter.autoReplyWith = (_) => lssResponse(lssCsStoreConfiguration, 0);
+
+      await lss.lssStoreConfiguration();
+
+      expect(adapter.sent[0].data[0], equals(lssCsStoreConfiguration));
+      expect(adapter.sent[0].data.sublist(1), everyElement(0));
+    });
+
+    test('returns LssError.success on error byte 0x00', () async {
+      adapter.autoReplyWith = (_) => lssResponse(lssCsStoreConfiguration, 0);
+
+      final result = await lss.lssStoreConfiguration();
+
+      expect(result, equals(LssError.success));
+    });
+
+    test('throws CanOpenTimeoutException if no response', () async {
+      await expectLater(
+        lss.lssStoreConfiguration(timeout: const Duration(milliseconds: 10)),
+        throwsA(isA<CanOpenTimeoutException>()),
+      );
+    });
+  });
+
+  // ── Phase 8: lssFastscan ──────────────────────────────────────────────────
+
+  group('lssFastscan', () {
+    /// Helper: builds a response queue that simulates one device:
+    /// probe → identity inquires × 4 → configureNodeId → storeConfig → no more probe.
+    void setupSingleDevice({
+      int vendorId = 0x00000001,
+      int productCode = 0x00000002,
+      int revisionNumber = 0x00000003,
+      int serialNumber = 0x00000004,
+    }) {
+      var probeCount = 0;
+      adapter.autoReplyWith = (request) {
+        final cs = request.data[0];
+        if (cs == lssCsFastscan) {
+          probeCount++;
+          // Only the first probe gets a response; subsequent ones time out.
+          return probeCount == 1 ? lssResponse(lssCsFastscanResponse) : null;
+        }
+        return switch (cs) {
+          lssCsInquireVendorId => lssResponse(lssCsInquireVendorId, vendorId),
+          lssCsInquireProductCode =>
+            lssResponse(lssCsInquireProductCode, productCode),
+          lssCsInquireRevisionNumber =>
+            lssResponse(lssCsInquireRevisionNumber, revisionNumber),
+          lssCsInquireSerialNumber =>
+            lssResponse(lssCsInquireSerialNumber, serialNumber),
+          lssCsConfigureNodeId =>
+            lssResponse(lssCsConfigureNodeId, 0), // success
+          lssCsStoreConfiguration =>
+            lssResponse(lssCsStoreConfiguration, 0), // success
+          _ => throw StateError('Unexpected cs=0x${cs.toRadixString(16)}'),
+        };
+      };
+    }
+
+    test('returns one LssAddress when single device responds', () async {
+      setupSingleDevice(
+        vendorId: 0xDEADBEEF,
+        productCode: 0x00001234,
+        revisionNumber: 0x00000005,
+        serialNumber: 0xABCD1234,
+      );
+
+      final results = await lss.lssFastscan(
+        probeTimeout: const Duration(milliseconds: 50),
+        timeout: const Duration(milliseconds: 500),
+      );
+
+      expect(results, hasLength(1));
+      expect(results[0].vendorId, equals(0xDEADBEEF));
+      expect(results[0].productCode, equals(0x00001234));
+      expect(results[0].revisionNumber, equals(0x00000005));
+      expect(results[0].serialNumber, equals(0xABCD1234));
+    });
+
+    test('returns empty list when no device responds to probe', () async {
+      // No autoReplyWith set — probe times out immediately.
+      final results = await lss.lssFastscan(
+        probeTimeout: const Duration(milliseconds: 10),
+        timeout: const Duration(milliseconds: 100),
+      );
+
+      expect(results, isEmpty);
+    });
+
+    test('assigns startNodeId to first found device', () async {
+      setupSingleDevice();
+
+      await lss.lssFastscan(
+        startNodeId: 42,
+        probeTimeout: const Duration(milliseconds: 50),
+        timeout: const Duration(milliseconds: 500),
+      );
+
+      // Find the configureNodeId frame in sent list.
+      final configFrame =
+          adapter.sent.firstWhere((m) => m.data[0] == lssCsConfigureNodeId);
+      expect(configFrame.data[1], equals(42));
+    });
+  });
+
+  // ── LssError ──────────────────────────────────────────────────────────────
+
+  group('LssError', () {
+    test('fromByte(0) == success', () {
+      expect(LssError.fromByte(0), equals(LssError.success));
+    });
+
+    test('fromByte(1) == nodeIdOutOfRange', () {
+      expect(LssError.fromByte(1), equals(LssError.nodeIdOutOfRange));
+    });
+
+    test('fromByte(0xFF) == specificError', () {
+      expect(LssError.fromByte(0xFF), equals(LssError.specificError));
+    });
+
+    test('fromByte(0x42) == specificError (unknown → specific)', () {
+      expect(LssError.fromByte(0x42), equals(LssError.specificError));
+    });
+
+    test('success.description is non-empty', () {
+      expect(LssError.success.description, isNotEmpty);
     });
   });
 }
