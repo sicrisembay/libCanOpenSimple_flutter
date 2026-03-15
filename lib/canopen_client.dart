@@ -22,6 +22,7 @@ export 'src/canopen/types.dart';
 
 // CANopen protocol modules
 export 'src/canopen/nmt.dart';
+export 'src/canopen/sdo.dart';
 
 // Errors
 export 'src/errors.dart';
