@@ -24,6 +24,8 @@ export 'src/canopen/types.dart';
 export 'src/canopen/nmt.dart';
 export 'src/canopen/sdo.dart';
 export 'src/canopen/pdo.dart';
+export 'src/canopen/sync.dart';
+export 'src/canopen/emcy.dart';
 
 // Errors
 export 'src/errors.dart';
