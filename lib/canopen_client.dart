@@ -16,6 +16,9 @@
 /// ```
 library canopen_client;
 
+// All-in-one facade
+export 'src/canopen_simple.dart';
+
 // Core models
 export 'src/canopen/message.dart';
 export 'src/canopen/types.dart';
