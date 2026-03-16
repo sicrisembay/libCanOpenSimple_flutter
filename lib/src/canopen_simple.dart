@@ -360,6 +360,31 @@ class CanOpenSimple {
           {Duration timeout = const Duration(seconds: 1)}) =>
       _requireConnected(() => _lss!.lssInquireSerialNumber(timeout: timeout));
 
+  /// Broadcasts a Vendor-ID inquiry and collects all responses until
+  /// [timeout] expires (one response per slave on the network).
+  Future<List<int>> lssInquireVendorIds(
+          {Duration timeout = const Duration(seconds: 2)}) =>
+      _requireConnected(() => _lss!.lssInquireVendorIds(timeout: timeout));
+
+  /// Broadcasts a Product-Code inquiry and collects all responses until
+  /// [timeout] expires.
+  Future<List<int>> lssInquireProductCodes(
+          {Duration timeout = const Duration(seconds: 2)}) =>
+      _requireConnected(() => _lss!.lssInquireProductCodes(timeout: timeout));
+
+  /// Broadcasts a Revision-Number inquiry and collects all responses until
+  /// [timeout] expires.
+  Future<List<int>> lssInquireRevisionNumbers(
+          {Duration timeout = const Duration(seconds: 2)}) =>
+      _requireConnected(
+          () => _lss!.lssInquireRevisionNumbers(timeout: timeout));
+
+  /// Broadcasts a Serial-Number inquiry and collects all responses until
+  /// [timeout] expires.
+  Future<List<int>> lssInquireSerialNumbers(
+          {Duration timeout = const Duration(seconds: 2)}) =>
+      _requireConnected(() => _lss!.lssInquireSerialNumbers(timeout: timeout));
+
   /// Configures the node-ID of the selected LSS slave.
   ///
   /// Returns [LssError.success] on acknowledgement.
