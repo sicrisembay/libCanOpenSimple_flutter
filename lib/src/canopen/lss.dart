@@ -47,6 +47,9 @@ const int lssCsInquireRevisionNumber = 0x5C;
 /// Inquire Identity Serial-Number.
 const int lssCsInquireSerialNumber = 0x5D;
 
+/// Inquire Node-ID (request and response share this cs byte).
+const int lssCsInquireNodeId = 0x5E;
+
 /// Identify Slave response cs byte.
 const int lssCsIdentifySlave = 0x4F;
 
@@ -231,6 +234,14 @@ class LssClient {
     Duration timeout = const Duration(seconds: 1),
   }) =>
       _inquire(lssCsInquireSerialNumber, timeout: timeout);
+
+  /// Reads the current Node-ID from the selected LSS slave.
+  ///
+  /// Returns 0xFF if the slave is unconfigured.
+  Future<int> lssInquireNodeId({
+    Duration timeout = const Duration(seconds: 1),
+  }) =>
+      _inquire(lssCsInquireNodeId, timeout: timeout);
 
   // ── Inquire (multi-response) ──────────────────────────────────────────────
 

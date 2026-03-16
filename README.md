@@ -6,9 +6,8 @@
 
 A **CANopen master/client** library for Flutter.
 
-Implements the core services of CiA 301 and CiA 305 over a USB-CANFD adapter
-([can_usb](https://pub.dev/packages/can_usb)), with a single, easy-to-use
-`CanOpenSimple` facade and fully injectable hardware abstraction for testing.
+Implements the core services of CiA 301 and CiA 305 over a
+[can_usb](https://pub.dev/packages/can_usb) flutter package, with a single, easy-to-use facade and fully injectable hardware abstraction for testing.
 
 ---
 

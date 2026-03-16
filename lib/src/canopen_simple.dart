@@ -360,6 +360,13 @@ class CanOpenSimple {
           {Duration timeout = const Duration(seconds: 1)}) =>
       _requireConnected(() => _lss!.lssInquireSerialNumber(timeout: timeout));
 
+  /// Reads the current Node-ID from the selected LSS slave.
+  ///
+  /// Returns 0xFF if the slave is unconfigured.
+  Future<int> lssInquireNodeId(
+          {Duration timeout = const Duration(seconds: 1)}) =>
+      _requireConnected(() => _lss!.lssInquireNodeId(timeout: timeout));
+
   /// Broadcasts a Vendor-ID inquiry and collects all responses until
   /// [timeout] expires (one response per slave on the network).
   Future<List<int>> lssInquireVendorIds(
