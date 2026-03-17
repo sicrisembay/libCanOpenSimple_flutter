@@ -53,6 +53,9 @@ class CanUsbAdapter implements ICanAdapter {
   }
 
   @override
+  bool get isConnected => _device.isConnected;
+
+  @override
   Future<List<String>> listPorts() async {
     try {
       final ports = await _device.listAvailablePorts();

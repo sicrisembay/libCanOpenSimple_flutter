@@ -29,6 +29,12 @@ dev_dependencies:
   mockito: ^5.4.0
   build_runner: ^2.4.0
 
+# Force the entire dependency graph to use the local path versions,
+# overriding the hosted versions required by canopen_client.
+dependency_overrides:
+  can_usb:
+    path: ../flutter_packages/packages/can_usb
+
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
 

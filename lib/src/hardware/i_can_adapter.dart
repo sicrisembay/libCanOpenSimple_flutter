@@ -48,6 +48,12 @@ abstract class ICanAdapter {
   /// Throws [HardwareException] if the disconnection fails.
   Future<void> disconnect();
 
+  /// Returns `true` if the adapter is currently connected to the hardware.
+  ///
+  /// The default implementation always returns `true`; concrete adapters
+  /// should override this to reflect real transport state.
+  bool get isConnected => true;
+
   /// Transmits a single CAN [message] on the bus.
   ///
   /// Throws [HardwareException] if the adapter is not connected or the

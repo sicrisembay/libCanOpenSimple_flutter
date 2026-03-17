@@ -62,9 +62,9 @@ class CanOpenSimple {
 
   bool _connected = false;
 
-  /// Returns `true` when [connect] has been called and [disconnect] has not
-  /// yet been called.
-  bool get isConnected => _connected;
+  /// Returns `true` when [connect] has been called, [disconnect] has not
+  /// yet been called, and the underlying adapter is still physically connected.
+  bool get isConnected => _connected && _adapter.isConnected;
 
   // ── Connection lifecycle ───────────────────────────────────────────────────
 
