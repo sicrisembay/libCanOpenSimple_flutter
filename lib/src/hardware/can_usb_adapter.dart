@@ -2,13 +2,11 @@
 library;
 
 import 'dart:async';
-import 'dart:io';
 
 import 'package:can_usb/can_usb.dart';
 import 'package:canopen_client/src/canopen/message.dart';
 import 'package:canopen_client/src/canopen/types.dart';
 import 'package:canopen_client/src/errors.dart';
-import 'package:canopen_client/src/hardware/android_serial_transport.dart';
 import 'package:canopen_client/src/hardware/i_can_adapter.dart';
 
 /// A [ICanAdapter] that communicates via the `can_usb` package.
@@ -27,15 +25,11 @@ class CanUsbAdapter implements ICanAdapter {
   /// Creates a [CanUsbAdapter].
   ///
   /// An optional [transport] may be supplied for unit testing.  When omitted
-  /// the correct transport for the current platform is selected automatically:
-  /// [AndroidSerialTransport] on Android, [SerialPortTransport] elsewhere.
+  /// [CanusbDevice] automatically selects the correct transport for the
+  /// current platform ([AndroidSerialTransport] on Android,
+  /// [SerialPortTransport] elsewhere).
   CanUsbAdapter({ISerialTransport? transport})
-      : _device = CanusbDevice(
-          transport: transport ??
-              (Platform.isAndroid
-                  ? AndroidSerialTransport()
-                  : SerialPortTransport()),
-        );
+      : _device = CanusbDevice(transport: transport);
 
   final CanusbDevice _device;
 
