@@ -85,6 +85,11 @@ class CanUsbAdapter implements ICanAdapter {
   Future<void> disconnect() async {
     try {
       await _device.canStop();
+    } on Exception {
+      // Best-effort: device may already be unreachable (e.g. physically
+      // removed). Always proceed to disconnect regardless.
+    }
+    try {
       await _device.disconnect();
     } on Exception catch (e) {
       throw HardwareException('Failed to disconnect: $e');
