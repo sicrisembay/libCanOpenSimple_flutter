@@ -6,6 +6,7 @@ import 'dart:typed_data';
 
 import 'package:canopen_client/src/canopen/emcy.dart';
 import 'package:canopen_client/src/canopen/lss.dart';
+import 'package:canopen_client/src/canopen/message.dart';
 import 'package:canopen_client/src/canopen/nmt.dart';
 import 'package:canopen_client/src/canopen/pdo.dart';
 import 'package:canopen_client/src/canopen/sdo.dart';
@@ -65,6 +66,12 @@ class CanOpenSimple {
   /// Returns `true` when [connect] has been called, [disconnect] has not
   /// yet been called, and the underlying adapter is still physically connected.
   bool get isConnected => _connected && _adapter.isConnected;
+
+  /// Broadcast stream of CAN frames successfully transmitted by the adapter.
+  ///
+  /// Useful for logging outgoing SDO/NMT/PDO traffic that is otherwise
+  /// invisible on [rxFrames].
+  Stream<CanMessage> get txFrames => _adapter.txFrames;
 
   // ── Connection lifecycle ───────────────────────────────────────────────────
 

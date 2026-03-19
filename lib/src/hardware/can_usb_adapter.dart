@@ -37,11 +37,18 @@ class CanUsbAdapter implements ICanAdapter {
   StreamController<CanMessage>? _controller;
   StreamSubscription<CanFrame>? _deviceSub;
 
+  // Broadcast stream controller for outgoing frames.
+  final StreamController<CanMessage> _txController =
+      StreamController<CanMessage>.broadcast();
+
   @override
   Stream<CanMessage> get rxFrames {
     _controller ??= _createController();
     return _controller!.stream;
   }
+
+  @override
+  Stream<CanMessage> get txFrames => _txController.stream;
 
   StreamController<CanMessage> _createController() {
     final ctrl = StreamController<CanMessage>.broadcast();
@@ -109,6 +116,7 @@ class CanUsbAdapter implements ICanAdapter {
     } on Exception catch (e) {
       throw HardwareException('Failed to send frame: $e');
     }
+    if (!_txController.isClosed) _txController.add(message);
   }
 
   @override
@@ -117,6 +125,7 @@ class CanUsbAdapter implements ICanAdapter {
     _deviceSub = null;
     _controller?.close();
     _controller = null;
+    _txController.close();
     _device.dispose();
   }
 

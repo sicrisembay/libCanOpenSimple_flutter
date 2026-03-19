@@ -29,6 +29,13 @@ abstract class ICanAdapter {
   /// are missed. The stream must be a broadcast stream.
   Stream<CanMessage> get rxFrames;
 
+  /// Broadcast stream of CAN frames successfully transmitted by [send].
+  ///
+  /// The default implementation returns an empty stream. Concrete adapters
+  /// that want to expose outgoing traffic (e.g. for monitoring) should
+  /// override this property.
+  Stream<CanMessage> get txFrames => const Stream.empty();
+
   /// Returns the names of all available serial ports/CAN adapters.
   ///
   /// Throws [HardwareException] if the port enumeration fails.

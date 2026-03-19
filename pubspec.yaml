@@ -19,7 +19,7 @@ platforms:
 dependencies:
   flutter:
     sdk: flutter
-  can_usb: ^0.1.1
+  can_usb: ^0.1.2
   synchronized: ^3.1.0
 
 dev_dependencies:
@@ -31,9 +31,9 @@ dev_dependencies:
 
 # Force the entire dependency graph to use the local path versions,
 # overriding the hosted versions required by canopen_client.
-dependency_overrides:
-  can_usb:
-    path: ../flutter_packages/packages/can_usb
+#dependency_overrides:
+#  can_usb:
+#    path: ../flutter_packages/packages/can_usb
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
