@@ -80,7 +80,7 @@ class CanUsbAdapter implements ICanAdapter {
 
     try {
       await _device.connect(port);
-      await _device.canStart();
+      await _device.canStart(arbBitrate: _toArbBitrate(speed));
     } on CanConnectionException catch (e) {
       throw HardwareException('Failed to connect to $port: $e');
     } on Exception catch (e) {
@@ -88,7 +88,18 @@ class CanUsbAdapter implements ICanAdapter {
     }
   }
 
-  @override
+  /// Maps a [BusSpeed] to the corresponding [ArbBitrate] for the CAN adapter.
+  static ArbBitrate _toArbBitrate(BusSpeed speed) => switch (speed) {
+        BusSpeed.baud1M => ArbBitrate.rate1000k,
+        BusSpeed.baud800k => ArbBitrate.rate800k,
+        BusSpeed.baud500k => ArbBitrate.rate500k,
+        BusSpeed.baud250k => ArbBitrate.rate250k,
+        BusSpeed.baud125k => ArbBitrate.rate125k,
+        BusSpeed.baud100k => ArbBitrate.rate100k,
+        BusSpeed.baud50k => ArbBitrate.rate50k,
+        BusSpeed.baud20k => ArbBitrate.rate20k,
+        BusSpeed.baud10k => ArbBitrate.rate10k,
+      };
   Future<void> disconnect() async {
     try {
       await _device.canStop();
